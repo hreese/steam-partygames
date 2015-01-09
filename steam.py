@@ -8,6 +8,7 @@ import itertools
 from pprint import pprint
 import re
 import sys
+import uuid
 
 #################### EDIT THIS #######################
 party_steam_usernames = ('hreese', 'aykura2342', 'lauri.banane', 'faselbart')
@@ -117,12 +118,19 @@ if __name__ == "__main__":
     #games_local_coop                 = redis.smembers('steam:game:hastrait:Local Co-op')
     #games_i_own                      = set(mygames.keys())
 
+    all_players_set_name = 'temp:%s' % str(uuid.uuid4())
+
     party_player_ids = redis.hmget('steam:user:name2id', party_steam_usernames)
+    redis.sunionstore(all_players_set_name, ['steam:player:owns:%s' % p for p in party_player_ids])
+    available_games = redis.smembers(all_players_set_name)
+    controllerfullgames = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Full controller support', all_players_set_name)
+    controllerpartgames = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Partial Controller Support', all_players_set_name)
+
+    print("\n=====[ All games available ]=====\n")
+    print "\n".join(sorted(["* " + names_by_id[g] for g in available_games]))
 
     print("\n=====[ Local Co-op and Full Controller Support ]=====\n")
-    partygames = redis.sinter('steam:game:hastrait:Full controller support', 'steam:game:hastrait:Local Co-op')
-    print "\n".join(sorted(["* " + names_by_id[g] for g in partygames]))
+    print "\n".join(sorted(["* " + names_by_id[g] for g in controllerfullgames]))
 
     print("\n=====[ Local Co-op and Partial Controller Support ]=====\n")
-    partygames_maybe = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Partial Controller Support')
-    print "\n".join(sorted(["* " + names_by_id[g] for g in partygames_maybe]))
+    print "\n".join(sorted(["* " + names_by_id[g] for g in controllerpartgames]))
