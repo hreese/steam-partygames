@@ -1,0 +1,6 @@
+Pygments==2.0.1
+beautifulsoup4==4.3.2
+bpython==0.13.1
+redis==2.10.3
+requests==2.5.1
+wsgiref==0.1.2
