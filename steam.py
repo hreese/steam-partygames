@@ -7,18 +7,27 @@ import redis
 import itertools
 from pprint import pprint
 import re
+import sys
+
+#################### EDIT THIS #######################
+party_steam_usernames = ('hreese', 'aykura2342', 'lauri.banane', 'faselbart')
+######################################################
 
 get_games_url = \
 'http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=%s&steamid=%s&format=json&include_appinfo=1&include_played_free_games=1'
 get_steamid_url = \
 'http://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/?key=%s&vanityurl=%s'
+get_friends_url = \
+'http://api.steampowered.com/ISteamUser/GetFriendList/v0001/?key=%s&steamid=%d'
+get_player_summaries_url = \
+'http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=%s&steamids=%s'
 
 # initialize redis
 redis = redis.StrictRedis()
 assert redis.ping()
 
 # open Steam API key
-with open('STEAM_API_KEY', 'r') as f:
+with open('.STEAM_API_KEY', 'r') as f:
     apikey = f.read().strip()
 
 def getcached(url, expiration=600):
@@ -31,10 +40,13 @@ def getcached(url, expiration=600):
         redis.setex(key, expiration, r.text)
         return r.text
 
-def UsernameToSteamID(username='hreese'):
+def UsernameToSteamID(username):
     resp = json.loads(getcached(get_steamid_url % (apikey, username)))
     assert resp['response']['success'] == 1 and resp['response'].has_key('steamid')
-    return int(resp['response']['steamid'])
+    steamid = int(resp['response']['steamid'])
+    redis.hset('steam:user:name2id', username, steamid)
+    redis.hset('steam:user:id2name', steamid, username)
+    return steamid
 
 # get game list
 def GetUserGames(steamid):
@@ -42,43 +54,75 @@ def GetUserGames(steamid):
     gamelist = json.loads(gamespage)
     GamesByID = dict(((g['appid'], g['name']) for g in gamelist['response']['games']))
     redis.hmset('steam:games:id2name', GamesByID)
+    redis.sadd('steam:player:owns:%s' % steamid, *GamesByID.keys())
     return GamesByID
+
+# get friends
+def GetFriends(steamid):
+    resp = json.loads(getcached(get_friends_url % (apikey, steamid)))
+    friends_ids = [int(x['steamid']) for x in resp['friendslist']['friends'] if x['relationship'] == 'friend']
+    f = {}
+    # split into chunks of 100
+    for somefriends in [friends_ids[i:i+100] for i in xrange(0,len(friends_ids),100)]:
+        friendsarg = ",".join([str(x) for x in somefriends])
+        friendinfos = json.loads(getcached(get_player_summaries_url % (apikey, friendsarg)))
+        f.update(friendinfos)
+    redis.hmset('steam:user:id2name', dict([(int(x['steamid']), x['personaname']) for x in f['response']['players']]))
+    redis.hmset('steam:user:name2id', dict([(x['personaname'], int(x['steamid'])) for x in f['response']['players']]))
+    return [int(x['steamid']) for x in f['response']['players']]
 
 # update/store game info in redis
 def RetrieveGameInfo(games):
     for gameid in games.keys():
-        print "Processing %s (%d)" % (games[gameid], gameid)
+        sys.stderr.write("Processing %s (%d) " % (games[gameid], gameid))
+        if redis.sismember('steam:game:traitsknown', gameid):
+            sys.stderr.write("already processed, skipped.\n")
+            continue
         gamestorepage = getcached('http://store.steampowered.com/app/%d/' % gameid, 3600 * 24)
         soup = BeautifulSoup(gamestorepage)
         try:
-            traits = [x.text for x in soup.find('div', {'id': 'category_block'}).findChildren('a')]
+            categories = soup.find('div', {'id': 'category_block'}).findChildren('a')
+            if len(categories) > 0:
+                traits = [x.text for x in categories]
+            else:
+                raise AttributeError()
         except AttributeError, e:
-            pass
-        # forward index
-        redis.hmset('steam:game:traits:%d' % gameid, dict(zip(traits, itertools.repeat(1))))
-        # reverse index
+            sys.stderr.write("no traits found, skipping.\n")
+            # add to list so no more testing is done for these
+            redis.sadd('steam:game:traitsknown', gameid)
+            continue
+        # global trait list
+        redis.sadd('steam:traits', *traits)
+        # forward index (game -> traits)
+        redis.sadd('steam:game:traits:%d' % gameid, traits)
+        # reverse index (trait -> games)
         for trait in traits:
-            redis.hmset('steam:traits:%s' % trait, { gameid: 1 })
+            redis.sadd('steam:game:hastrait:%s' % trait, gameid)
+        redis.sadd('steam:game:traitsknown', gameid)
+        sys.stderr.write("done.\n")
 
 if __name__ == "__main__":
     steamid = UsernameToSteamID('hreese')
     mygames = GetUserGames(steamid)
-    ### only needed once and after buying games
-    #RetrieveGameInfo(mygames)
-    ###
+    all_games = mygames
+    for f in GetFriends(steamid):
+        sys.stderr.write("Retrieving game list for user %s\n" % f)
+        all_games.update(GetUserGames(f))
+    RetrieveGameInfo(all_games)
     names_by_id = redis.hgetall('steam:games:id2name')
 
-    traits_no_eula = (t for t in (x.replace('steam:traits:', '') for x in redis.keys('steam:traits:*')) if not re.search('EULA', t, re.I))
+    #traits_no_eula = [t for t in redis.smembers('steam:traits') if not re. search('EULA', t, re.I)]
+    #games_full_controller_support    = redis.smembers('steam:game:hastrait:Full controller support')
+    #games_partial_controller_support = redis.smembers('steam:game:hastrait:Partial Controller Support')
+    #games_local_coop                 = redis.smembers('steam:game:hastrait:Local Co-op')
+    #games_i_own                      = set(mygames.keys())
 
-    games_full_controller_support    = set(redis.hgetall('steam:traits:Full controller support').keys())
-    games_partial_controller_support = set(redis.hgetall('steam:traits:Partial Controller Support').keys())
-    games_local_coop                 = set(redis.hgetall('steam:traits:Local Co-op').keys())
-    games_i_own                      = set(mygames.keys())
+    party_player_ids = redis.hmget('steam:user:name2id', party_steam_usernames)
 
     print("\n=====[ Local Co-op and Full Controller Support ]=====\n")
-    partygames = games_local_coop.intersection(games_full_controller_support)
+    partygames = redis.sinter('steam:game:hastrait:Full controller support', 'steam:game:hastrait:Local Co-op')
     print "\n".join(sorted(["* " + names_by_id[g] for g in partygames]))
 
     print("\n=====[ Local Co-op and Partial Controller Support ]=====\n")
-    partygames_maybe = games_local_coop.intersection(games_partial_controller_support)
+    partygames_maybe = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Partial Controller Support')
     print "\n".join(sorted(["* " + names_by_id[g] for g in partygames_maybe]))
