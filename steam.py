@@ -126,6 +126,8 @@ if __name__ == "__main__":
     controllerfullgames = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Full controller support', all_players_set_name)
     controllerpartgames = redis.sinter('steam:game:hastrait:Local Co-op', 'steam:game:hastrait:Partial Controller Support', all_players_set_name)
 
+    redis.delete(all_players_set_name)
+
     print("\n=====[ All games available ]=====\n")
     print "\n".join(sorted(["* " + names_by_id[g] for g in available_games]))
 
